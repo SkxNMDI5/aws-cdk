@@ -1,88 +1,75 @@
+import cxapi = require('@aws-cdk/cx-api');
 import colors = require('colors/safe');
 import table = require('table');
 import yargs = require('yargs');
-import { print } from '../../lib/logging';
-import { DEFAULTS, loadProjectConfig, saveProjectConfig } from '../settings';
+import { print, warning } from '../../lib/logging';
+import { collectMetadataEntries, combineMetadataEntries, Metadata } from '../api/cxapp/stacks';
+import { CommandOptions } from '../command-api';
 
 export const command = 'secrets [STACKS..]';
 export const describe = 'Manage secrets referenced from your CDK app';
 export const builder = {
-  reset: {
-    alias: 'e',
-    desc: 'The context key (or its index) to reset',
+  write: {
+    alias: 'w',
+    desc: 'Secret to write',
     type: 'string',
     requiresArg: 'KEY'
   },
-  clear: {
-    desc: 'Clear all context',
-    type: 'boolean',
+  value: {
+    desc: 'Secret value to write (if omitted, will be prompted for the value)',
+    type: 'string',
+    requiresArg: 'VALUE'
   },
 };
 
-export async function handler(args: yargs.Arguments): Promise<number> {
-  const settings = await loadProjectConfig();
-  const context = settings.get(['context']) || {};
-
-  if (args.clear) {
-    settings.set(['context'], {});
-    await saveProjectConfig(settings);
-    print('All context values cleared.');
-  } else if (args.reset) {
-    invalidateContext(context, args.reset);
-    settings.set(['context'], context);
-    await saveProjectConfig(settings);
-  } else {
-    // List -- support '--json' flag
-    if (args.json) {
-      process.stdout.write(JSON.stringify(context, undefined, 2));
-    } else {
-      listContext(context);
-    }
-  }
-
-  return 0;
+export function handler(args: yargs.Arguments) {
+  args.commandHandler = realHandler;
 }
 
-function listContext(context: any) {
-  const keys = contextKeys(context);
+export async function realHandler(options: CommandOptions): Promise<number> {
+  const stacks = await options.appStacks.selectStacks(...(options.args.STACKS || []));
+  const secrets = collectSecrets(stacks);
 
   // Print config by default
-  const data: any[] = [[colors.green('#'), colors.green('Key'), colors.green('Value')]];
-  for (const [i, key] of keys) {
-    const jsonWithoutNewlines = JSON.stringify(context[key], undefined, 2).replace(/\s+/g, ' ');
-    data.push([i, key, jsonWithoutNewlines]);
+  const data: any[] = [[colors.green('#'), colors.green('Secret'), colors.green('Has Value?'), colors.green('Used')]];
+  for (const [i, secret] of secrets) {
+    data.push([i, describeSecret(secret.metadata), '*****', secret.paths.join(' ')]);
   }
 
-  print(`Context found in ${colors.blue(DEFAULTS)}:\n`);
+  print(`Secrets used this app:\n`);
 
   print(table.table(data, {
       border: table.getBorderCharacters('norc'),
       columns: {
         1: { width: 50, wrapWord: true } as any,
-        2: { width: 50, wrapWord: true } as any
+        3: { width: 50, wrapWord: true } as any
       }
   }));
 
-  // tslint:disable-next-line:max-line-length
-  print(`Run ${colors.blue('cdk context --reset KEY_OR_NUMBER')} to remove a context key. It will be refreshed on the next CDK synthesis run.`);
+  return 0;
 }
 
-function invalidateContext(context: any, key: string) {
-  const i = parseInt(key, 10);
-  if (`${i}` === key) {
-    // Twas a number and we fully parsed it.
-    key = keyByNumber(context, i);
-  }
+type NumberedSecret = [number, Metadata<cxapi.SecretMetadataEntry>];
 
-  // Unset!
-  if (key in context) {
-    delete context[key];
-    print(`Context value ${colors.blue(key)} reset. It will be refreshed on the next SDK synthesis run.`);
-  } else {
-    print(`No context value with key ${colors.blue(key)}`);
-  }
+/**
+ * Recurse over all stacks, collect all secret metadata entries and number then
+ */
+function collectSecrets(stacks: cxapi.SynthesizedStack[]): NumberedSecret[] {
+  // Find all referenced secrets in all selected apps
+  const secrets = combineMetadataEntries(secretKey, collectMetadataEntries(cxapi.SECRET_METADATA, ...stacks));
+
+  // Filter down to only the ones we know
+  const supportedTypes = ['secretsmanager'];
+  secrets.filter(s => !supportedTypes.includes(s.metadata.type)).forEach(s => {
+    warning(`Unrecognized secret type: ${s.metadata.type}, used at ${s.paths}`);
+  });
+
+  const supportedSecrets = secrets.filter(s => supportedTypes.includes(s.metadata.type)) ;
+
+  return enumerate1(supportedSecrets);
 }
 
+/*
 function keyByNumber(context: any, n: number) {
   for (const [i, key] of contextKeys(context)) {
     if (n === i) {
@@ -91,15 +78,7 @@ function keyByNumber(context: any, n: number) {
   }
   throw new Error(`No context key with number: ${n}`);
 }
-
-/**
- * Return enumerated keys in a definitive order
- */
-function contextKeys(context: any) {
-  const keys = Object.keys(context);
-  keys.sort();
-  return enumerate1(keys);
-}
+*/
 
 function enumerate1<T>(xs: T[]): Array<[number, T]> {
   const ret = new Array<[number, T]>();
@@ -109,4 +88,22 @@ function enumerate1<T>(xs: T[]): Array<[number, T]> {
     i += 1;
   }
   return ret;
+}
+
+/**
+ * Return a unique key string per secret
+ */
+function secretKey(entry: cxapi.SecretMetadataEntry) {
+  return [entry.type, entry.identifier, entry.jsonKey, entry.versionStage, entry.versionId].toString();
+}
+
+/**
+ * Return a descriptive string per secret
+ */
+function describeSecret(entry: cxapi.SecretMetadataEntry) {
+  const parts = [entry.identifier];
+  if (entry.jsonKey) { parts.push(`.${entry.jsonKey}`); }
+  if (entry.versionStage) { parts.push(`@${entry.versionStage}`); }
+  if (entry.versionId) { parts.push(`@${entry.versionId}`); }
+  return parts.join('');
 }

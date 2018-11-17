@@ -192,3 +192,60 @@ export class AppStacks {
 export function listStackNames(stacks: cxapi.SynthesizedStack[]): string {
   return stacks.map(s => s.name).join(', ');
 }
+
+/**
+ * Collect all metadata entries of a particular type in the given set of stacks
+ *
+ * Assume their associated 'data' is of the given type.
+ *
+ * paths will always contain exactly one path.
+ */
+export function collectMetadataEntries<T>(metadataType: string, ...stacks: cxapi.SynthesizedStack[]): Array<Metadata<T>> {
+  const ret = new Array<Metadata<T>>();
+
+  for (const stack of stacks) {
+    for (const [resourcePath, entries] of Object.entries(stack.metadata)) {
+      ret.push(...entries.filter(e => e.type === metadataType).map(e => ({
+        metadata: e.data as T,
+        paths: [resourcePath]
+      })));
+    }
+  }
+
+  return ret;
+}
+
+/**
+ * Combine metadata entries that have the same string value
+ */
+export function combineMetadataEntries<T>(keyFn: (x: T) => string, metadata: Array<Metadata<T>>): Array<Metadata<T>> {
+  const ret = new Map<string, Metadata<T>>();
+
+  for (const meta of metadata) {
+    const key = keyFn(meta.metadata);
+
+    const previous = ret.get(key);
+    if (previous) {
+      previous.paths.push(...meta.paths);
+    } else {
+      ret.set(key, meta);
+    }
+  }
+
+  return Array.from(ret.values());
+}
+
+/**
+ * A piece of metadata found in the tree
+ */
+export interface Metadata<T> {
+  /**
+   * The piece of metadata
+   */
+  metadata: T;
+
+  /**
+   * The paths where the metadata was found
+   */
+  paths: string[];
+}
